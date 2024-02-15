@@ -57,11 +57,12 @@ def calculate_performance_metrics(df: DataFrame) -> Tuple[float, float, float, f
     Tuple[float, float, float, float]: Uma tupla contendo os valores das métricas MAPE, R², RMSE e MAE,
                                        nesta ordem.
     """
+    median_ape = np.median(np.abs((df.real - df.forecast) / df.real)) * 100
     mape = np.mean(np.abs((df.real - df.forecast) / df.real)) * 100
     r2 = r2_score(df.real, df.forecast)
     rmse = mean_squared_error(df.real, df.forecast, squared=False)
     mae = mean_absolute_error(df.real, df.forecast)
-    return mape, r2, rmse, mae
+    return mape, r2, rmse, mae, median_ape
 
 
 def get_seasonality(series: pd.Series):
@@ -98,9 +99,15 @@ def make_stationary(
     return d, D, s
 
 
+def prepare_metrics(metrics: Dict[str, any]):
+    metrics["tests_data"]["date"] = metrics["tests_data"]["date"].dt.strftime("%Y-%m-%d")
+    metrics["tests_data"] = metrics["tests_data"].to_dict()
+    return metrics
+
+
 def residual_analysis(model: SARIMAX) -> Tuple[bool, str]:
     resid = model.fit().resid
-    if acorr_ljungbox(resid, lags=range(48), return_df=True).dropna().lb_pvalue.min() < 0.05:
+    if acorr_ljungbox(resid, lags=resid.shape[0]-1, return_df=True).dropna().lb_pvalue.min() < 0.05:
         text = "O teste estatistico indica que os residuos nao sao independentes, logo, há padroes nos residuos que o modelo nao capturou"
         return True, text
     text = "O teste estatistico indica que os residuos sao independentes, logo, nao há padroes restantes nos residuos"
@@ -230,29 +237,29 @@ class SARIMA:
 
     @P.setter
     def P(self, value):
-        if value < 0:
+        if value <= 0:
             self._P = 0
         else:
             self._P = value
 
     @D.setter
     def D(self, value):
-        if value < 0:
+        if value <= 0:
             self._D = 0
         else:
             self._D = value
 
     @Q.setter
     def Q(self, value):
-        if value < 0:
+        if value <= 0:
             self._Q = 0
         else:
             self._Q = value
 
     @s.setter
     def s(self, value):
-        if value > 0:
-            self._s = min(12,value)
+        if value > 3:
+            self._s = min(12, value)
         else:
             self._s = 0
 
@@ -311,11 +318,11 @@ class SARIMA:
         evaluate_df = DataFrame(loops).T[["forecast", "real"]]
         evaluate_df["date"] = evaluate_df.forecast.apply(lambda x: x.index[0])
         evaluate_df.forecast = evaluate_df.forecast.apply(lambda x: x.values[0])
-        mape, r2, rmse, mae = calculate_performance_metrics(evaluate_df)
+        mape, r2, rmse, mae, median_ape = calculate_performance_metrics(evaluate_df)
         _, text = residual_analysis(loops["loop_1"]["model"])
-        return {"tests_data": evaluate_df, "metrics": {"mape": mape, "r2": r2, "rmse": rmse, "mae": mae}, "analise_estatistica_dos_residuos_do_modelo":text}
+        return {"tests_data": evaluate_df, "metrics": {"mape": mape, "r2": r2, "rmse": rmse, "mae": mae, "mediana_mape": median_ape}, "analise_estatistica_dos_residuos_do_modelo":text}
     
-    def forecast(self):
+    def forecast(self) -> DataFrame:
         self.model, forecast, predicts = self.setup_model(self.original_series, order=self.order, s_order=self.seasonal_order)
         return pd.concat([predicts.append(forecast), self.original_series], axis=1).rename(columns={0:"previsto","setor": "real"})
 
@@ -344,3 +351,9 @@ class SARIMA:
         for i in range(n_loops, 0, -1):
             loops |= self.get_model_infos(index=(None if i == 0 else -i))
         return loops
+    
+    def export_results(self, esp: str) -> Tuple[dict, pd.DataFrame]:
+        metrics = prepare_metrics(self.evaluate_model())
+        forecast = self.forecast()
+        forecast.insert(2, "especialidade", esp)
+        return metrics, forecast
